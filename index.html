@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Pixel Fighter: Character Select</title>
+    <style>
+        body { background: #1a1a1a; color: #0f0; font-family: 'Courier New', monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; overflow: hidden; }
+        canvas { background: #000; border: 4px solid #333; image-rendering: pixelated; }
+        .overlay { position: absolute; background: rgba(0,0,0,0.95); width: 600px; height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 10; border: 4px solid #333; }
+        .row { display: flex; gap: 20px; margin-top: 10px; }
+        button { background: #222; color: #0f0; border: 2px solid #0f0; padding: 10px; cursor: pointer; font-family: inherit; font-size: 14px; width: 150px; }
+        button:hover { background: #0f0; color: #000; }
+        .char-box { border: 2px solid #555; padding: 10px; text-align: center; width: 120px; }
+        .instructions { margin-top: 15px; color: #888; text-align: center; font-size: 11px; }
+    </style>
+</head>
+<body>
+
+    <div id="ui-container">
+        <div id="char-menu" class="overlay">
+            <h2 style="color: white;">SELECT YOUR FIGHTER</h2>
+            <div class="row">
+                <div class="char-box">
+                    <div style="width:30px; height:50px; background:#0095DD; margin: 0 auto 10px;"></div>
+                    <button onclick="selectChar('#0095DD', 'BEAM', 100, 5)">STRIKER</button>
+                </div>
+                <div class="char-box">
+                    <div style="width:30px; height:50px; background:#FFD700; margin: 0 auto 10px;"></div>
+                    <button onclick="selectChar('#FFD700', 'QUAKE', 140, 3)">TANK</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="diff-menu" class="overlay" style="display:none;">
+            <h2 style="color: white;">SELECT DIFFICULTY</h2>
+            <button onclick="setDifficulty(0.02, 120)">EASY</button>
+            <button onclick="setDifficulty(0.05, 80)">MEDIUM</button>
+            <button onclick="setDifficulty(0.1, 40)">HARD</button>
+        </div>
+
+        <canvas id="game" width="600" height="300"></canvas>
+    </div>
+    
+    <div class="instructions">
+        <b>CONTROLS:</b> [W] Jump | [A][D] Move | [Space] Punch | [Q] Fireball | [E] SPECIAL
+    </div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const charMenu = document.getElementById('char-menu');
+const diffMenu = document.getElementById('diff-menu');
+
+let gameStarted = false;
+let config = { color: '', special: '', hp: 100, speed: 5 };
+let aiDifficulty = { aggression: 0.05, reaction: 80 };
+const keys = {};
+
+window.addEventListener('keydown', e => { 
+    keys[e.code] = true; 
+    if(["Space","ArrowUp","KeyW","KeyE"].includes(e.code)) e.preventDefault();
+});
+window.addEventListener('keyup', e => keys[e.code] = false);
+
+function selectChar(color, special, hp, speed) {
+    config = { color, special, hp, speed };
+    charMenu.style.display = 'none';
+    diffMenu.style.display = 'flex';
+}
+
+function setDifficulty(agg, react) {
+    aiDifficulty = { aggression: agg, reaction: react };
+    diffMenu.style.display = 'none';
+    setupPlayers();
+    gameStarted = true;
+    loop();
+}
+
+class Particle {
+    constructor(x, y, dir) { this.x = x; this.y = y; this.dir = dir; this.active = true; }
+    update() { this.x += this.dir * 8; if(this.x < 0 || this.x > 600) this.active = false; }
+    draw() { ctx.fillStyle = "yellow"; ctx.beginPath(); ctx.arc(this.x, this.y, 6, 0, Math.PI*2); ctx.fill(); }
+}
+
+class Fighter {
+    constructor(x, color, side, stats, isCPU = false) {
+        this.x = x; this.y = 190; this.w = 35; this.h = 60;
+        this.color = color; this.side = side;
+        this.hp = stats.hp; this.maxHp = stats.hp;
+        this.speed = stats.speed;
+        this.specialType = stats.special;
+        this.superBar = 0; this.dy = 0; this.onGround = false;
+        this.facing = side; this.isPunching = false; this.isSpecial = false;
+        this.projectiles = []; this.cooldown = false; this.isCPU = isCPU;
+    }
+
+    update(enemy) {
+        if (this.isCPU) this.runAI(enemy);
+        else this.handleInputs(enemy);
+
+        if (this.superBar < 100) this.superBar += 0.1;
+
+        this.dy += 0.8; this.y += this.dy;
+        if (this.y + this.h >= 250) { this.y = 250 - this.h; this.dy = 0; this.onGround = true; }
+        
+        this.x = Math.max(0, Math.min(565, this.x));
+
+        this.projectiles.forEach((p, i) => {
+            p.update();
+            if (p.x > enemy.x && p.x < enemy.x + enemy.w && p.y > enemy.y && p.y < enemy.y + enemy.h) {
+                enemy.hp -= 5; this.superBar += 5; p.active = false;
+            }
+            if(!p.active) this.projectiles.splice(i, 1);
+        });
+    }
+
+    handleInputs(enemy) {
+        if (keys['KeyA']) { this.x -= this.speed; this.facing = -1; }
+        if (keys['KeyD']) { this.x += this.speed; this.facing = 1; }
+        if (keys['KeyW'] && this.onGround) { this.dy = -15; this.onGround = false; }
+        this.isPunching = !!keys['Space'];
+        if (this.isPunching) this.checkHit(enemy);
+        if (keys['KeyQ'] && !this.cooldown) this.shoot();
+        if (keys['KeyE'] && this.superBar >= 100) this.useSpecial(enemy);
+    }
+
+    runAI(enemy) {
+        const dist = enemy.x - this.x;
+        this.facing = dist > 0 ? 1 : -1;
+        if (Math.abs(dist) > aiDifficulty.reaction) this.x += (dist > 0 ? 3 : -3);
+        if (Math.abs(dist) < 50 && Math.random() < aiDifficulty.aggression) {
+            this.isPunching = true; this.checkHit(enemy);
+        } else { this.isPunching = false; }
+        if (this.superBar >= 100 && Math.random() < 0.02) this.useSpecial(enemy);
+    }
+
+    useSpecial(target) {
+        this.isSpecial = true; this.superBar = 0;
+        setTimeout(() => {
+            this.isSpecial = false;
+            let hit = false;
+            if (this.specialType === 'BEAM') {
+                hit = (this.facing === 1 ? target.x > this.x : target.x < this.x) && Math.abs(this.y - target.y) < 100;
+            } else { // QUAKE
+                hit = target.onGround;
+            }
+            if (hit) { target.hp -= 25; target.dy = -10; }
+        }, 600);
+    }
+
+    checkHit(target) {
+        let hitX = this.facing === 1 ? this.x + this.w : this.x - 20;
+        if (hitX < target.x + target.w && hitX + 20 > target.x && this.y < target.y + target.h && this.y + 20 > target.y) {
+            target.hp -= 0.3; this.superBar += 1;
+        }
+    }
+
+    shoot() {
+        this.projectiles.push(new Particle(this.x + 15, this.y + 20, this.facing));
+        this.cooldown = true; setTimeout(() => this.cooldown = false, 800);
+    }
+
+    draw() {
+        ctx.fillStyle = this.color; ctx.fillRect(this.x, this.y, this.w, this.h);
+        ctx.fillStyle = "black"; ctx.fillRect(this.facing === 1 ? this.x + 25 : this.x + 5, this.y + 10, 5, 5);
+        if (this.isPunching) { ctx.fillStyle = "white"; ctx.fillRect(this.facing === 1 ? this.x + 35 : this.x - 20, this.y + 20, 20, 10); }
+        if (this.isSpecial) {
+            ctx.fillStyle = this.specialType === 'BEAM' ? "cyan" : "white";
+            if (this.specialType === 'BEAM') ctx.fillRect(this.facing === 1 ? this.x + 35 : this.x - 600, this.y + 10, 600, 40);
+            else ctx.fillRect(0, 245, 600, 10); // Quake visual
+        }
+        this.projectiles.forEach(p => p.draw());
+    }
+}
+
+let p1, p2;
+function setupPlayers() {
+    p1 = new Fighter(100, config.color, 1, config);
+    // CPU always gets a balanced build but higher aggression
+    p2 = new Fighter(470, '#DD1C1A', -1, {hp: 120, speed: 4, special: 'BEAM'}, true);
+}
+
+function loop() {
+    if(!gameStarted) return;
+    ctx.clearRect(0, 0, 600, 300);
+    ctx.fillStyle = "#333"; ctx.fillRect(0, 250, 600, 50);
+
+    p1.update(p2); p2.update(p1);
+    p1.draw(); p2.draw();
+
+    // UI
+    ctx.fillStyle = "red"; ctx.fillRect(20, 10, 200, 10); ctx.fillRect(380, 10, 200, 10);
+    ctx.fillStyle = "lime"; 
+    ctx.fillRect(20, 10, (p1.hp/p1.maxHp) * 200, 10);
+    ctx.fillRect(380 + (200 - (p2.hp/p2.maxHp) * 200), 10, (p2.hp/p2.maxHp) * 200, 10);
+    
+    ctx.fillStyle = p1.superBar >= 100 ? "cyan" : "blue"; ctx.fillRect(20, 25, p1.superBar, 5);
+    ctx.fillStyle = "blue"; ctx.fillRect(480 + (100 - p2.superBar), 25, p2.superBar, 5);
+
+    if (p1.hp <= 0 || p2.hp <= 0) {
+        ctx.fillStyle = "white"; ctx.font = "30px Arial";
+        ctx.fillText(p1.hp <= 0 ? "GAME OVER" : "VICTORY", 230, 150);
+        return;
+    }
+    requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
+
+
